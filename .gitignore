@@ -1,0 +1,19 @@
+# Entorno virtual y dependencias
+.venv/
+venv/
+env/
+__pycache__/
+*.pyc
+
+# Variables de entorno y credenciales (NUNCA SUBIR CLAVES)
+.env
+*.env
+
+# Base de datos SQLite
+*.db
+*.sqlite3
+
+# Sistema operativo
+.DS_Store
+Thumbs.db
+

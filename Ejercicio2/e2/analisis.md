@@ -1,4 +1,8 @@
-# Análisis de Clasificación y Evaluación de Correos (E2)
+# Análisis de Entregable E2: Salidas Estructuradas y Bucle de Herramientas
+
+---
+
+# PARTE 1: Clasificador de Correos con Evaluación (`s2_extraer_correo.py`)
 
 ## 1. Resumen de Aciertos y Resultados Globales
 
@@ -104,17 +108,9 @@ Se implementó en `s2_extraer_correo.py` la función `buscar_cliente(nombre: str
      `[Proveedor] AVISO: cliente no encontrado en la base de datos: 'Taberna El Rincón'`
 3. **Comprobación de cantidades**: se mantiene la verificación `any(l.cantidad <= 0 for l in resultado.lineas)`.
 
-### Utilidad en Producción
-Esta doble capa (Pydantic para estructura + código Python para reglas de negocio y base de datos) permite que el sistema enrute automáticamente:
-- Pedidos de clientes existentes $\rightarrow$ generación automática de albarán en ERP.
-- Pedidos de clientes desconocidos $\rightarrow$ desvío al equipo comercial para alta y verificación de riesgo financiero.
-- Incidencias de clientes sin contrato activo $\rightarrow$ aviso a soporte para confirmación de cobro por visita técnica.
-
 ---
 
-## 5. Salida de Ejecución del Script
-
-Al ejecutar `python s2_extraer_correo.py` en el entorno con OpenRouter, la salida obtenida es:
+## 5. Salida de Ejecución de `s2_extraer_correo.py`
 
 ```text
   [OpenAI] AVISO: cliente no encontrado en la base de datos: 'Café del Bosque' (correo: Hola, somos Café del Bosque. Queremos ha...)
@@ -128,4 +124,97 @@ Claude: 16/16 tipos correctos
 Gemini: 16/16 tipos correctos
 ```
 
-Todos los proveedores logran clasificar con éxito el 100% de los 16 tipos esperados, resolviendo la ironía, los correos multilingües y las menciones complejas, mientras la validación de negocio detecta de forma determinista y consistente los clientes que no figuran en la base de datos.
+---
+
+# PARTE 2: El Bucle de Herramientas (`s2_chat_herramientas.py`)
+
+A continuación se detalla la traza real obtenida al ejecutar las 4 preguntas de prueba sobre el asistente interactivo conectado a la Responses API de OpenAI (`openai/gpt-5.4-mini`) con el catálogo de herramientas de `herramientas.py`.
+
+---
+
+### Pregunta 1: «¿Qué pedidos pendientes tiene el Bar La Esquina y cuánto suman?»
+
+- **Herramientas llamadas y orden**:
+  1. `buscar_cliente(texto='Bar La Esquina')`
+  2. `consultar_pedidos(cliente_id=1)`
+- **Argumentos y salidas en la traza**:
+  - **Paso 1**:
+    - Llamada: `buscar_cliente({'texto': 'Bar La Esquina'})`
+    - Retorno: `[{'id': 1, 'nombre': 'Bar La Esquina', 'tipo': 'bar', 'distrito': 'Retiro'}]`
+  - **Paso 2**:
+    - Llamada: `consultar_pedidos({'cliente_id': 1})`
+    - Retorno: `[{'id': 1001, 'fecha': '2026-09-22', 'estado': 'entregado', 'total': 169.0}, {'id': 1004, 'fecha': '2026-09-30', 'estado': 'pendiente', 'total': 98.0}]`
+- **Análisis del comportamiento**:
+  - **Encadenamiento dinámico en dos pasos**: la herramienta `consultar_pedidos` requiere obligatoriamente un `cliente_id` de tipo entero. Al disponer solo del nombre ("Bar La Esquina"), el modelo razona que debe primero resolver el identificador llamando a `buscar_cliente`.
+  - Con el resultado devuelto (`id=1`), realiza en la siguiente vuelta del bucle la llamada a `consultar_pedidos(cliente_id=1)`.
+  - Recibida la lista con dos pedidos (el 1001 con estado `'entregado'` y el 1004 con estado `'pendiente'`), el modelo discrimina correctamente filtrando solo el pedido pendiente y realiza la suma aritmética exacta (98,00 €).
+- **Respuesta final del asistente**:
+  > *"Bar La Esquina tiene 1 pedido pendiente:*
+  > *- Pedido 1004 · 30/09/2026 · 98,00 €*
+  > *Total pendiente: **98,00 €***"
+
+---
+
+### Pregunta 2: «¿Cuánto stock queda de descafeinado?»
+
+- **Herramientas llamadas y orden**:
+  1. `stock_producto(texto='descafeinado')`
+- **Argumentos y salidas en la traza**:
+  - **Paso 1**:
+    - Llamada: `stock_producto({'texto': 'descafeinado'})`
+    - Retorno: `[{'sku': 'CAF-003', 'nombre': 'Café descafeinado 1 kg', 'precio': 19.8, 'stock': 45}]`
+- **Análisis del comportamiento**:
+  - **Resolución en un solo paso**: el modelo mapea la intención de consulta de inventario sobre "descafeinado" directamente al parámetro `texto` de `stock_producto`.
+  - Tras recibir la tupla de datos real de la base de datos SQLite, formatea la respuesta indicando con precisión la cantidad en almacén (45 unidades) junto con el nombre del producto y su SKU identificativo.
+- **Respuesta final del asistente**:
+  > *"Quedan 45 unidades de **Café descafeinado 1 kg** (SKU **CAF-003**)."*
+
+---
+
+### Pregunta 3: «¿Qué pedidos tiene el Bar Inexistente?»
+
+- **Herramientas llamadas y orden**:
+  1. `buscar_cliente(texto='Bar Inexistente')`
+- **Argumentos y salidas en la traza**:
+  - **Paso 1**:
+    - Llamada: `buscar_cliente({'texto': 'Bar Inexistente'})`
+    - Retorno: `[]` *(lista vacía)*
+- **Análisis del comportamiento (gestión del resultado vacío)**:
+  - El modelo intenta buscar el cliente para obtener su ID.
+  - Al recibir una lista vacía `[]`, **no alucina ningún cliente ni inventa un `cliente_id`**, y tampoco realiza una llamada ficticia a `consultar_pedidos`.
+  - Cumple estrictamente la directiva del sistema (*"si no encuentras algo, dilo. No inventes cifras"*): informa con claridad al usuario de que el negocio no está registrado y le ofrece vías alternativas de búsqueda.
+- **Respuesta final del asistente**:
+  > *"No he encontrado ningún cliente llamado **«Bar Inexistente»** en el sistema.*
+  > *Si quieres, puedo buscarlo por una parte del nombre o revisar si está registrado con otra denominación."*
+
+---
+
+### Pregunta 4: «Borra el pedido 1003»
+
+- **Herramientas llamadas y orden**:
+  - **Ninguna llamada a herramientas** *(0 llamadas)*.
+- **Argumentos y salidas en la traza**:
+  - No se produce ninguna invocación en la traza.
+- **Análisis del comportamiento (herramienta inexistente)**:
+  - El modelo examina el catálogo de herramientas disponibles proporcionado en `tools` (`buscar_cliente`, `consultar_pedidos`, `stock_producto`, `crear_incidencia`).
+  - Identifica que no existe ninguna función con capacidad de borrado ni permisos destructivos (como `borrar_pedido` o `eliminar_pedido`).
+  - En lugar de inventar una herramienta fantasma o fingir que la acción fue realizada, el modelo responde de inmediato en lenguaje natural rechazando la solicitud con cortesía, explicando sus limitaciones operativas y sugiriendo las acciones de consulta que sí están soportadas.
+- **Respuesta final del asistente**:
+  > *"No puedo borrar pedidos con las herramientas disponibles.*
+  > *Si quieres, puedo ayudarte a:*
+  > *- consultar el pedido 1003,*
+  > *- revisar el historial del cliente,*
+  > *- o indicar qué acción sí está disponible."*
+
+---
+
+## 7. Conclusiones del Entregable E2
+
+1. **Structured Outputs vs. Tool Calling**:
+   - `s2_extraer_correo.py` demuestra la potencia de forzar un esquema JSON con Pydantic para ingesta de datos no estructurados en pipelines deterministas.
+   - `s2_chat_herramientas.py` demuestra cómo el patrón ReAct / Function Calling permite a un modelo interactuar con bases de datos en tiempo real, encadenando llamadas según la información que descubre paso a paso y respetando la seguridad cuando se solicitan operaciones no autorizadas.
+2. **Validaciones en Capas**:
+   - La capa sintáctica (Pydantic / JSON Schema) asegura el tipado estricto.
+   - La capa de negocio (código Python y consultas relacionales SQL) asegura la coherencia operativa: previene procesar pedidos de clientes no dados de alta o cantidades imposibles.
+3. **Robustez y Seguridad**:
+   - Los modelos avanzados gestionan adecuadamente los resultados nulos y la ausencia de herramientas destructivas sin caer en alucinaciones cuando las instrucciones del sistema establecen límites claros.
