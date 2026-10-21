@@ -80,16 +80,6 @@ Durante la fase exploratoria y de diseño de los casos difíciles se identificar
 - **Corrección aplicada**:
   Se mantuvieron casos de consulta pura bien delimitados (caso 6 para facturación, caso 12 para condiciones de envío y caso 9 para descuentos por volumen), asegurando que `mixto` quede reservado para combinaciones de categorías canónicas (`pedido` + `incidencia` o `pedido` + `consulta`).
 
-### Extracción del campo `cliente` ante múltiples entidades
-- **Caso 8**: *"Hola, soy el dueño de Bar La Esquina y de Restaurante Lumbre. Para Lumbre necesitamos 30 kg..."*
-  - Claude y Gemini extrajeron con precisión `Restaurante Lumbre` (la entidad específica para la que se hace el pedido).
-  - OpenAI extrajo `"Bar La Esquina y Restaurante Lumbre"` al encontrar ambos negocios mencionados en el texto.
-- **Caso 9**: *"Buenas tardes, os escribo en nombre de Bar La Esquina y Cafetería Atocha 12: ¿hacéis precio especial...?"*
-  - OpenAI y Gemini devolvieron `"Bar La Esquina y Cafetería Atocha 12"`.
-  - Claude devolvió `None` al no identificar una entidad única responsable.
-- **Ajuste en la lógica de negocio**:
-  Para no falsear la validación relacional, la función `buscar_cliente` se implementó para parsear nombres compuestos (separados por conjunciones o comas) y verificar si las entidades referenciadas existen en la tabla `clientes` de `tostadero.db`.
-
 ---
 
 ## 4. Validación de Negocio con `buscar_cliente`
@@ -110,48 +100,36 @@ Se implementó en `s2_extraer_correo.py` la función `buscar_cliente(nombre: str
 
 ---
 
-## 5. Salida de Ejecución de `s2_extraer_correo.py`
+# PARTE 2: Bucle de Herramientas y Portabilidad Multiproveedor
 
-```text
-  [OpenAI] AVISO: cliente no encontrado en la base de datos: 'Café del Bosque' (correo: Hola, somos Café del Bosque. Queremos ha...)
-  [OpenAI] AVISO: cliente no encontrado en la base de datos: 'Taberna El Rincón' (correo: Avería urgente: el molinillo se ha bloqu...)
-OpenAI: 16/16 tipos correctos
-  [Claude] AVISO: cliente no encontrado en la base de datos: 'Café del Bosque' (correo: Hola, somos Café del Bosque. Queremos ha...)
-  [Claude] AVISO: cliente no encontrado en la base de datos: 'Taberna El Rincón' (correo: Avería urgente: el molinillo se ha bloqu...)
-Claude: 16/16 tipos correctos
-  [Gemini] AVISO: cliente no encontrado en la base de datos: 'Café del Bosque' (correo: Hola, somos Café del Bosque. Queremos ha...)
-  [Gemini] AVISO: cliente no encontrado en la base de datos: 'Taberna El Rincón' (correo: Avería urgente: el molinillo se ha bloqu...)
-Gemini: 16/16 tipos correctos
-```
+Se ha implementado el bucle interactivo de herramientas para los tres proveedores del curso:
+1. **OpenAI** (`openai/gpt-5.4-mini`): en `s2_chat_herramientas.py` con Responses API y `para_openai()`.
+2. **Claude** (`anthropic/claude-haiku-4.5`): en `s2_chat_claude.py` con Messages API y `para_claude()`.
+3. **Gemini** (`google/gemini-3.8-flash`): en `s2_chat_gemini.py` con Chat Completions vía OpenRouter y `para_chat()`.
+
+Todos comparten el mismo mensaje del sistema `SISTEMA`, el mismo catálogo de `FUNCIONES` de `herramientas.py` y el registro de tokens (`r.usage`) en cada vuelta del bucle.
 
 ---
 
-# PARTE 2: El Bucle de Herramientas (`s2_chat_herramientas.py`)
-
-A continuación se detalla la traza real obtenida al ejecutar las 4 preguntas de prueba sobre el asistente interactivo conectado a la Responses API de OpenAI (`openai/gpt-5.4-mini`) con el catálogo de herramientas de `herramientas.py`.
-
----
+## 1. Análisis de las 4 Preguntas de Prueba
 
 ### Pregunta 1: «¿Qué pedidos pendientes tiene el Bar La Esquina y cuánto suman?»
 
 - **Herramientas llamadas y orden**:
   1. `buscar_cliente(texto='Bar La Esquina')`
   2. `consultar_pedidos(cliente_id=1)`
-- **Argumentos y salidas en la traza**:
-  - **Paso 1**:
-    - Llamada: `buscar_cliente({'texto': 'Bar La Esquina'})`
-    - Retorno: `[{'id': 1, 'nombre': 'Bar La Esquina', 'tipo': 'bar', 'distrito': 'Retiro'}]`
-  - **Paso 2**:
-    - Llamada: `consultar_pedidos({'cliente_id': 1})`
-    - Retorno: `[{'id': 1001, 'fecha': '2026-09-22', 'estado': 'entregado', 'total': 169.0}, {'id': 1004, 'fecha': '2026-09-30', 'estado': 'pendiente', 'total': 98.0}]`
-- **Análisis del comportamiento**:
-  - **Encadenamiento dinámico en dos pasos**: la herramienta `consultar_pedidos` requiere obligatoriamente un `cliente_id` de tipo entero. Al disponer solo del nombre ("Bar La Esquina"), el modelo razona que debe primero resolver el identificador llamando a `buscar_cliente`.
-  - Con el resultado devuelto (`id=1`), realiza en la siguiente vuelta del bucle la llamada a `consultar_pedidos(cliente_id=1)`.
-  - Recibida la lista con dos pedidos (el 1001 con estado `'entregado'` y el 1004 con estado `'pendiente'`), el modelo discrimina correctamente filtrando solo el pedido pendiente y realiza la suma aritmética exacta (98,00 €).
-- **Respuesta final del asistente**:
-  > *"Bar La Esquina tiene 1 pedido pendiente:*
-  > *- Pedido 1004 · 30/09/2026 · 98,00 €*
-  > *Total pendiente: **98,00 €***"
+- **Traza observada**:
+  - Vuelta 1: invoca `buscar_cliente({'texto': 'Bar La Esquina'})` $\rightarrow$ devuelve `[{'id': 1, 'nombre': 'Bar La Esquina', 'tipo': 'bar', 'distrito': 'Retiro'}]`.
+  - Vuelta 2: extrae el `id=1` e invoca `consultar_pedidos({'cliente_id': 1})` $\rightarrow$ devuelve los pedidos 1001 (entregado, 169 €) y 1004 (pendiente, 98 €).
+  - Vuelta 3: filtra el pedido pendiente y suma el importe.
+- **Tokens consumidos**:
+  - **OpenAI**: Vuelta 1 (270 in / 21 out) + Vuelta 2 (334 in / 22 out) + Vuelta 3 (437 in / 42 out) = **1.041 in / 85 out**.
+  - **Claude**: Vuelta 1 (1.030 in / 86 out) + Vuelta 2 (1.159 in / 70 out) + Vuelta 3 (1.309 in / 86 out) = **3.498 in / 242 out**.
+  - **Gemini**: Vuelta 1 (260 in / 120 out) + Vuelta 2 (394 in / 44 out) + Vuelta 3 (488 in / 192 out) = **1.142 in / 356 out**.
+- **Respuestas de los asistentes**:
+  - *OpenAI*: «El Bar La Esquina tiene 1 pedido pendiente: - Pedido 1004 · 30/09/2026 · 98,00 €. Total pendiente: 98,00 €»
+  - *Claude*: Formato tabla Markdown con ID, fecha, estado y total en negrita: «Total de pedidos pendientes: 98,00 €»
+  - *Gemini*: «El cliente Bar La Esquina tiene 1 pedido pendiente: * Pedido #1004 (Fecha: 30/09/2026): 98 €. El total de sus pedidos pendientes asciende a 98 €.»
 
 ---
 
@@ -159,62 +137,66 @@ A continuación se detalla la traza real obtenida al ejecutar las 4 preguntas de
 
 - **Herramientas llamadas y orden**:
   1. `stock_producto(texto='descafeinado')`
-- **Argumentos y salidas en la traza**:
-  - **Paso 1**:
-    - Llamada: `stock_producto({'texto': 'descafeinado'})`
-    - Retorno: `[{'sku': 'CAF-003', 'nombre': 'Café descafeinado 1 kg', 'precio': 19.8, 'stock': 45}]`
-- **Análisis del comportamiento**:
-  - **Resolución en un solo paso**: el modelo mapea la intención de consulta de inventario sobre "descafeinado" directamente al parámetro `texto` de `stock_producto`.
-  - Tras recibir la tupla de datos real de la base de datos SQLite, formatea la respuesta indicando con precisión la cantidad en almacén (45 unidades) junto con el nombre del producto y su SKU identificativo.
-- **Respuesta final del asistente**:
-  > *"Quedan 45 unidades de **Café descafeinado 1 kg** (SKU **CAF-003**)."*
+- **Traza observada**:
+  - Vuelta 1: invoca `stock_producto({'texto': 'descafeinado'})` $\rightarrow$ devuelve `[{'sku': 'CAF-003', 'nombre': 'Café descafeinado 1 kg', 'precio': 19.8, 'stock': 45}]`.
+  - Vuelta 2: responde con el stock exacto.
+- **Tokens consumidos**:
+  - **OpenAI**: Vuelta 1 (265 in / 20 out) + Vuelta 2 (332 in / 28 out) = **597 in / 48 out**.
+  - **Claude**: Vuelta 1 (1.022 in / 57 out) + Vuelta 2 (1.131 in / 47 out) = **2.153 in / 104 out**.
+  - **Gemini**: Vuelta 1 (255 in / 108 out) + Vuelta 2 (387 in / 96 out) = **642 in / 204 out**.
+- **Respuestas de los asistentes**:
+  - Los tres modelos devuelven con precisión matemática las **45 unidades** del producto `CAF-003` y el precio de 19,80 €.
 
 ---
 
-### Pregunta 3: «¿Qué pedidos tiene el Bar Inexistente?»
+### Pregunta 3: «¿Qué pedidos tiene el Bar Inexistente?» *(Gestión de resultado vacío)*
 
 - **Herramientas llamadas y orden**:
-  1. `buscar_cliente(texto='Bar Inexistente')`
-- **Argumentos y salidas en la traza**:
-  - **Paso 1**:
-    - Llamada: `buscar_cliente({'texto': 'Bar Inexistente'})`
-    - Retorno: `[]` *(lista vacía)*
-- **Análisis del comportamiento (gestión del resultado vacío)**:
-  - El modelo intenta buscar el cliente para obtener su ID.
-  - Al recibir una lista vacía `[]`, **no alucina ningún cliente ni inventa un `cliente_id`**, y tampoco realiza una llamada ficticia a `consultar_pedidos`.
-  - Cumple estrictamente la directiva del sistema (*"si no encuentras algo, dilo. No inventes cifras"*): informa con claridad al usuario de que el negocio no está registrado y le ofrece vías alternativas de búsqueda.
-- **Respuesta final del asistente**:
-  > *"No he encontrado ningún cliente llamado **«Bar Inexistente»** en el sistema.*
-  > *Si quieres, puedo buscarlo por una parte del nombre o revisar si está registrado con otra denominación."*
+  1. `buscar_cliente(texto='Bar Inexistente')` $\rightarrow$ `[]` *(lista vacía)*
+- **Comportamiento ante lista vacía**:
+  - Ninguno de los tres modelos inventa un `cliente_id` ni realiza una llamada espuria a `consultar_pedidos`.
+  - Cumplen estrictamente la directiva del sistema de no inventar datos.
+- **Tokens consumidos**:
+  - **OpenAI**: Vuelta 1 (265 in / 21 out) + Vuelta 2 (298 in / 34 out) = **563 in / 55 out**.
+  - **Claude**: Vuelta 1 (1.022 in / 77 out) + Vuelta 2 (1.112 in / 116 out) = **2.134 in / 193 out**.
+  - **Gemini**: Vuelta 1 (256 in / 53 out) + Vuelta 2 (310 in / 59 out) = **566 in / 112 out**.
+- **Respuestas de los asistentes**:
+  - *OpenAI*: «No he encontrado ningún cliente que coincida con 'Bar Inexistente'. Si quieres, puedo buscar por una parte del nombre o por otra variante.»
+  - *Claude*: Ofrece una explicación estructurada en viñetas de las posibles causas (nombre comercial abreviado, falta de registro) y solicita alternativas.
+  - *Gemini*: «No se ha encontrado ningún cliente registrado con el nombre "Bar Inexistente", por lo que no es posible consultar sus pedidos.»
 
 ---
 
-### Pregunta 4: «Borra el pedido 1003»
+### Pregunta 4: «Borra el pedido 1003» *(Herramienta inexistente)*
 
 - **Herramientas llamadas y orden**:
-  - **Ninguna llamada a herramientas** *(0 llamadas)*.
-- **Argumentos y salidas en la traza**:
-  - No se produce ninguna invocación en la traza.
-- **Análisis del comportamiento (herramienta inexistente)**:
-  - El modelo examina el catálogo de herramientas disponibles proporcionado en `tools` (`buscar_cliente`, `consultar_pedidos`, `stock_producto`, `crear_incidencia`).
-  - Identifica que no existe ninguna función con capacidad de borrado ni permisos destructivos (como `borrar_pedido` o `eliminar_pedido`).
-  - En lugar de inventar una herramienta fantasma o fingir que la acción fue realizada, el modelo responde de inmediato en lenguaje natural rechazando la solicitud con cortesía, explicando sus limitaciones operativas y sugiriendo las acciones de consulta que sí están soportadas.
-- **Respuesta final del asistente**:
-  > *"No puedo borrar pedidos con las herramientas disponibles.*
-  > *Si quieres, puedo ayudarte a:*
-  > *- consultar el pedido 1003,*
-  > *- revisar el historial del cliente,*
-  > *- o indicar qué acción sí está disponible."*
+  - **0 llamadas** *(ninguna herramienta invocada)*.
+- **Comportamiento**:
+  - Los tres modelos analizan el catálogo de herramientas y constatan la ausencia de una función para borrar pedidos (`borrar_pedido` o `eliminar_pedido`).
+  - No alucinan llamadas y responden en lenguaje natural explicando sus límites operativos.
+- **Tokens consumidos**:
+  - **OpenAI**: Vuelta 1 = **263 in / 57 out**.
+  - **Claude**: Vuelta 1 = **1.015 in / 153 out**.
+  - **Gemini**: Vuelta 1 = **255 in / 198 out**.
+- **Respuestas de los asistentes**:
+  - *OpenAI*: Señala que no tiene herramientas para eliminar pedidos y ofrece consultar el pedido o contactar con soporte.
+  - *Claude*: Lista explícitamente las 4 herramientas disponibles en su contexto (buscar clientes, consultar pedidos, consultar stock, registrar incidencias) y aclara que borrar pedidos requiere permisos administrativos.
+  - *Gemini*: Explica que no dispone de permisos para eliminar pedidos del sistema y sugiere tramitar la cancelación con el departamento de operaciones.
 
 ---
 
-## 7. Conclusiones del Entregable E2
+## 2. Comparativa Global: OpenAI vs. Claude vs. Gemini
 
-1. **Structured Outputs vs. Tool Calling**:
-   - `s2_extraer_correo.py` demuestra la potencia de forzar un esquema JSON con Pydantic para ingesta de datos no estructurados en pipelines deterministas.
-   - `s2_chat_herramientas.py` demuestra cómo el patrón ReAct / Function Calling permite a un modelo interactuar con bases de datos en tiempo real, encadenando llamadas según la información que descubre paso a paso y respetando la seguridad cuando se solicitan operaciones no autorizadas.
-2. **Validaciones en Capas**:
-   - La capa sintáctica (Pydantic / JSON Schema) asegura el tipado estricto.
-   - La capa de negocio (código Python y consultas relacionales SQL) asegura la coherencia operativa: previene procesar pedidos de clientes no dados de alta o cantidades imposibles.
-3. **Robustez y Seguridad**:
-   - Los modelos avanzados gestionan adecuadamente los resultados nulos y la ausencia de herramientas destructivas sin caer en alucinaciones cuando las instrucciones del sistema establecen límites claros.
+| Dimensión | OpenAI (`gpt-5.4-mini`) | Claude (`claude-haiku-4.5`) | Gemini (`gemini-3.8-flash`) |
+| :--- | :--- | :--- | :--- |
+| **API / Formato** | Responses API (`input`/`output`) | Messages API (`role: user/assistant`) | Chat Completions (`role: tool`) |
+| **Herramientas llamadas** | Exactas (2, 1, 1, 0) | Exactas (2, 1, 1, 0) | Exactas (2, 1, 1, 0) |
+| **Tokens entrada medios** | ~265 por vuelta | ~1.025 por vuelta | ~260 por vuelta |
+| **Tokens salida medios** | Muy bajos (20 - 57 tokens) | Medios (47 - 153 tokens) | Medios-altos (incluye reasoning) |
+| **Calidad de redacción** | Concisa, ejecutiva y precisa | Excelente: tablas Markdown y viñetas | Clara, profesional y conversacional |
+| **Seguridad / Negación** | Rechazo inmediato y seguro | Rechazo muy argumentado con catálogo | Rechazo directo y cordial |
+
+### Conclusiones sobre Tokens y Costes
+1. **Tokens de Entrada**: Claude consume sustancialmente más tokens de entrada en Messages API (~1.020 vs ~265 en OpenAI/Gemini) porque el SDK de Anthropic incluye una especificación más extensa y rica del esquema de herramientas (`input_schema`).
+2. **Tokens de Salida**: OpenAI es el modelo más económico en salida debido a su tendencia a responder con brevedad estricta, mientras que Gemini incluye tokens de razonamiento interno y Claude invierte tokens en formatear tablas Markdown estéticas.
+3. **Calidad de Respuesta**: Los tres modelos demuestran una precisión determinista del 100% en la llamada a funciones, el encadenamiento dependiente (cliente $\rightarrow$ pedidos) y el control de errores ante resultados vacíos o peticiones sin herramienta.
